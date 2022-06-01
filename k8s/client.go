@@ -729,35 +729,24 @@ func (c *Client) GetRunningCiliumVersion(ctx context.Context, namespace string) 
 		return "", fmt.Errorf("unable to list cilium pods: %w", err)
 	}
 	if len(pods.Items) > 0 && len(pods.Items[0].Spec.Containers) > 0 {
-		for _, container := range pods.Items[0].Spec.Containers {
-			image := strings.SplitN(container.Image, ":", 2)
-			base := strings.Split(image[0], "/")
-			last := base[len(base)-1]
-			if !strings.HasPrefix(last, "cilium") {
-				// skip non cilium images
-				continue
-			}
-			// default to "latest" as k8s may not include it explicitly
-			version := "latest"
-			if len(image) > 2 {
-				// skip image with too many colons
-				continue
-			} else if len(image) == 2 {
-				version = image[1]
-				// chop off digest if any
-				if digest := strings.Index(version, "@"); digest > 0 {
-					version = version[:digest]
-				}
-			}
-			// Add any part in the pod image separated by a '-` to the version,
-			// e.g., "quay.io/cilium/cilium-ci:1234" -> "-ci:1234"
-			dash := strings.Index(last, "-")
-			if dash >= 0 {
-				version = last[dash:] + ":" + version
-			}
-			return version, nil
+		image := pods.Items[0].Spec.Containers[0].Image
+		version := strings.SplitN(image, ":", 2)
+		if len(version) != 2 {
+			return "", errors.New("unable to extract cilium version from container image")
 		}
-		return "", errors.New("unable to obtain cilium version: no cilium container found")
+		v := version[1]
+		if digest := strings.Index(v, "@"); digest > 0 {
+			v = v[:digest]
+		}
+		// Add any part in the pod image separated by a '-` to the version,
+		// e.g., "quay.io/cilium/cilium-ci:1234" -> "-ci:1234"
+		base := strings.Split(version[0], "/")
+		last := base[len(base)-1]
+		dash := strings.Index(last, "-")
+		if dash >= 0 {
+			v = last[dash:] + ":" + v
+		}
+		return v, nil
 	}
 	return "", errors.New("unable to obtain cilium version: no cilium pods found")
 }
