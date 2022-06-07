@@ -60,18 +60,18 @@ type k8sHubbleImplementation interface {
 	GetDaemonSet(ctx context.Context, namespace, name string, opts metav1.GetOptions) (*appsv1.DaemonSet, error)
 	CiliumStatus(ctx context.Context, namespace, pod string) (*models.StatusResponse, error)
 	ListCiliumEndpoints(ctx context.Context, namespace string, opts metav1.ListOptions) (*ciliumv2.CiliumEndpointList, error)
-	GetRunningCiliumVersion(ctx context.Context, namespace string) (string, error)
 	GetServerVersion() (*semver.Version, error)
+	GetHelmState(ctx context.Context, namespace string, secretName string) (*helm.State, error)
 }
 
 type K8sHubble struct {
-	client              k8sHubbleImplementation
-	params              Parameters
-	certManager         *certs.CertManager
-	ciliumVersion       string
-	manifests           map[string]string
-	semVerCiliumVersion semver.Version
-	helmYAMLValues      string
+	ctx            context.Context
+	client         k8sHubbleImplementation
+	params         Parameters
+	certManager    *certs.CertManager
+	manifests      map[string]string
+	helmYAMLValues string
+	helmState      *helm.State
 }
 
 var (
@@ -105,10 +105,6 @@ type Parameters struct {
 	Context          string // Only for 'kubectl' pass-through commands
 	Wait             bool
 	WaitDuration     time.Duration
-
-	// BaseVersion is used to explicitly specify Cilium version for generating the config map
-	// in case it cannot be inferred from the Version field (e.g. commit SHA tags for CI images).
-	BaseVersion string
 
 	// K8sVersion is the Kubernetes version that will be used to generate the
 	// kubernetes manifests. If the auto-detection fails, this flag can be used
@@ -152,14 +148,19 @@ func (p *Parameters) validateParams() error {
 	return nil
 }
 
-func NewK8sHubble(client k8sHubbleImplementation, p Parameters) *K8sHubble {
+func NewK8sHubble(ctx context.Context, client k8sHubbleImplementation, p Parameters) (*K8sHubble, error) {
 	cm := certs.NewCertManager(client, certs.Parameters{Namespace: p.Namespace})
-
+	helmState, err := client.GetHelmState(ctx, p.Namespace, p.HelmValuesSecretName)
+	if err != nil {
+		return nil, err
+	}
 	return &K8sHubble{
+		ctx:         ctx,
 		client:      client,
 		params:      p,
 		certManager: cm,
-	}
+		helmState:   helmState,
+	}, nil
 }
 
 func (k *K8sHubble) Log(format string, a ...interface{}) {
@@ -182,7 +183,7 @@ func (k *K8sHubble) generatePeerService() *corev1.Service {
 	var (
 		svcFilename string
 	)
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 	switch {
 	case versioncheck.MustCompile(">=1.11.0")(ciliumVer):
 		svcFilename = "templates/hubble/peer-service.yaml"
@@ -249,64 +250,49 @@ func (k *K8sHubble) disableHubble(ctx context.Context) error {
 	return k.updateConfigMap(ctx)
 }
 
-func (k *K8sHubble) Disable(ctx context.Context) error {
-
-	// Ignore the GetRunningCiliumVersion error since it doesn't work for
-	// unreleased versions, and we will fall back to the --base-version
-	k.ciliumVersion, _ = k.client.GetRunningCiliumVersion(ctx, k.params.Namespace)
-	k.semVerCiliumVersion = k.getCiliumVersion()
-
-	helmSecret, err := k.client.GetSecret(ctx, k.params.Namespace, k.params.HelmValuesSecretName, metav1.GetOptions{})
+func (k *K8sHubble) Disable() error {
+	helmState, err := k.client.GetHelmState(k.ctx, k.params.Namespace, k.params.HelmValuesSecretName)
 	if err != nil {
-		return fmt.Errorf("unable to retrieve helm values secret %s/%s: %w", k.params.Namespace, k.params.HelmValuesSecretName, err)
-	}
-	yamlSecret, ok := helmSecret.Data[defaults.HelmValuesSecretKeyName]
-	if !ok {
-		return fmt.Errorf("unable to retrieve helm values from secret %s/%s: %w", k.params.Namespace, k.params.HelmValuesSecretName, err)
-	}
-
-	vals, err := chartutil.ReadValues(yamlSecret)
-	if err != nil {
-		return fmt.Errorf("unable to parse helm values from secret %s/%s: %w", k.params.Namespace, k.params.HelmValuesSecretName, err)
+		return err
 	}
 
 	// Generate the manifests has if hubble was being enabled so that we can
 	// retrieve all UI and Relay's resource names.
 	k.params.UI = true
 	k.params.Relay = true
-	err = k.generateManifestsEnable(ctx, false, vals)
+	err = k.generateManifestsEnable(k.ctx, false, helmState.Values)
 	if err != nil {
 		return err
 	}
 
-	if err := k.disableUI(ctx); err != nil {
+	if err := k.disableUI(k.ctx); err != nil {
 		return err
 	}
 
-	if err := k.disableRelay(ctx); err != nil {
+	if err := k.disableRelay(k.ctx); err != nil {
 		return err
 	}
 
 	if peerSvc := k.generatePeerService(); peerSvc != nil {
 		k.Log("🔥 Deleting Peer Service...")
-		k.client.DeleteService(ctx, peerSvc.GetNamespace(), peerSvc.GetName(), metav1.DeleteOptions{})
+		k.client.DeleteService(k.ctx, peerSvc.GetNamespace(), peerSvc.GetName(), metav1.DeleteOptions{})
 	}
 
 	// Now that we have delete all UI and Relay's resource names then we can
 	// generate the manifests with UI and Relay disabled.
-	err = k.generateManifestsDisable(ctx, vals)
+	err = k.generateManifestsDisable(k.ctx, helmState.Values)
 	if err != nil {
 		return err
 	}
 
-	if err := k.disableHubble(ctx); err != nil {
+	if err := k.disableHubble(k.ctx); err != nil {
 		return err
 	}
 
 	k.Log("ℹ️  Storing helm values file in %s/%s Secret", k.params.Namespace, k.params.HelmValuesSecretName)
 
-	helmSecret.Data[defaults.HelmValuesSecretKeyName] = []byte(k.helmYAMLValues)
-	if _, err := k.client.UpdateSecret(ctx, k.params.Namespace, helmSecret, metav1.UpdateOptions{}); err != nil {
+	helmState.Secret.Data[defaults.HelmValuesSecretKeyName] = []byte(k.helmYAMLValues)
+	if _, err := k.client.UpdateSecret(k.ctx, k.params.Namespace, helmState.Secret, metav1.UpdateOptions{}); err != nil {
 		k.Log("❌ Unable to store helm values file %s/%s Secret", k.params.Namespace, k.params.HelmValuesSecretName)
 		return err
 	}
@@ -321,7 +307,7 @@ func (k *K8sHubble) generateConfigMap() (*corev1.ConfigMap, error) {
 		cmFilename string
 	)
 
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 	switch {
 	case versioncheck.MustCompile(">=1.9.0")(ciliumVer):
 		cmFilename = "templates/cilium-configmap.yaml"
@@ -363,17 +349,8 @@ func (k *K8sHubble) updateConfigMap(ctx context.Context) error {
 	return nil
 }
 
-func (k *K8sHubble) getCiliumVersion() semver.Version {
-	v, err := utils.ParseCiliumVersion(k.ciliumVersion, k.params.BaseVersion)
-	if err != nil {
-		v = versioncheck.MustVersion(defaults.Version)
-		k.Log("Unable to parse the provided version %q, assuming %v for ConfigMap compatibility", k.ciliumVersion, defaults.Version)
-	}
-	return v
-}
-
 func (k *K8sHubble) generateManifestsEnable(ctx context.Context, printHelmTemplate bool, helmValues chartutil.Values) error {
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 
 	helmMapOpts := map[string]string{}
 
@@ -429,7 +406,7 @@ func (k *K8sHubble) generateManifestsEnable(ctx context.Context, printHelmTempla
 }
 
 func (k *K8sHubble) generateManifestsDisable(ctx context.Context, helmValues chartutil.Values) error {
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 
 	helmMapOpts := map[string]string{}
 
@@ -485,24 +462,19 @@ func (k *K8sHubble) genManifests(ctx context.Context, printHelmTemplate bool, pr
 	return nil
 }
 
-func (k *K8sHubble) Enable(ctx context.Context) error {
+func (k *K8sHubble) Enable() error {
 	if err := k.params.validateParams(); err != nil {
 		return err
 	}
 
-	// Ignore the GetRunningCiliumVersion error since it doesn't work for
-	// unreleased versions, and we will fall back to the --base-version
-	k.ciliumVersion, _ = k.client.GetRunningCiliumVersion(ctx, k.params.Namespace)
-	k.semVerCiliumVersion = k.getCiliumVersion()
-
-	caSecret, created, err := k.certManager.GetOrCreateCASecret(ctx, defaults.CASecretName, k.params.CreateCA)
+	caSecret, created, err := k.certManager.GetOrCreateCASecret(k.ctx, defaults.CASecretName, k.params.CreateCA)
 	if err != nil {
 		k.Log("❌ Unable to get or create the Cilium CA Secret: %s", err)
 		return err
 	}
 
 	if caSecret != nil {
-		err = k.certManager.LoadCAFromK8s(ctx, caSecret)
+		err = k.certManager.LoadCAFromK8s(k.ctx, caSecret)
 		if err != nil {
 			k.Log("❌ Unable to load Cilium CA: %s", err)
 			return err
@@ -514,26 +486,17 @@ func (k *K8sHubble) Enable(ctx context.Context) error {
 		}
 	}
 
-	helmSecret, err := k.client.GetSecret(ctx, k.params.Namespace, k.params.HelmValuesSecretName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("unable to retrieve helm values secret %s/%s: %w", k.params.Namespace, k.params.HelmValuesSecretName, err)
-	}
-	yamlSecret, ok := helmSecret.Data[defaults.HelmValuesSecretKeyName]
-	if !ok {
-		return fmt.Errorf("unable to retrieve helm values from secret %s/%s: %w", k.params.Namespace, k.params.HelmValuesSecretName, err)
-	}
-
-	vals, err := chartutil.ReadValues(yamlSecret)
-	if err != nil {
-		return fmt.Errorf("unable to parse helm values from secret %s/%s: %w", k.params.Namespace, k.params.HelmValuesSecretName, err)
-	}
-
-	err = k.generateManifestsEnable(ctx, true, vals)
+	helmState, err := k.client.GetHelmState(k.ctx, k.params.Namespace, k.params.HelmValuesSecretName)
 	if err != nil {
 		return err
 	}
 
-	if err := k.enableHubble(ctx); err != nil {
+	err = k.generateManifestsEnable(k.ctx, true, helmState.Values)
+	if err != nil {
+		return err
+	}
+
+	if err := k.enableHubble(k.ctx); err != nil {
 		return err
 	}
 
@@ -552,7 +515,7 @@ func (k *K8sHubble) Enable(ctx context.Context) error {
 		}
 		dur = time.Since(start)
 
-		s, err := collector.Status(ctx)
+		s, err := collector.Status(k.ctx)
 		if err != nil {
 			fmt.Println(s.Format())
 			return err
@@ -561,14 +524,14 @@ func (k *K8sHubble) Enable(ctx context.Context) error {
 
 	if peerSvc := k.generatePeerService(); peerSvc != nil {
 		k.Log("🚀 Creating Peer Service...")
-		if _, err := k.client.CreateService(ctx, k.params.Namespace, peerSvc, metav1.CreateOptions{}); err != nil {
+		if _, err := k.client.CreateService(k.ctx, k.params.Namespace, peerSvc, metav1.CreateOptions{}); err != nil {
 			return err
 		}
 	}
 
 	var warnFreePods []string
 	if k.params.Relay {
-		podsName, err := k.enableRelay(ctx)
+		podsName, err := k.enableRelay(k.ctx)
 		if err != nil {
 			return err
 		}
@@ -577,7 +540,7 @@ func (k *K8sHubble) Enable(ctx context.Context) error {
 	}
 
 	if k.params.UI {
-		podsName, err := k.enableUI(ctx)
+		podsName, err := k.enableUI(k.ctx)
 		if err != nil {
 			return err
 		}
@@ -597,7 +560,7 @@ func (k *K8sHubble) Enable(ctx context.Context) error {
 			return err
 		}
 
-		s, err := collector.Status(ctx)
+		s, err := collector.Status(k.ctx)
 		if err != nil {
 			fmt.Println(s.Format())
 			return err
@@ -606,8 +569,8 @@ func (k *K8sHubble) Enable(ctx context.Context) error {
 
 	k.Log("ℹ️  Storing helm values file in %s/%s Secret", k.params.Namespace, k.params.HelmValuesSecretName)
 
-	helmSecret.Data[defaults.HelmValuesSecretKeyName] = []byte(k.helmYAMLValues)
-	if _, err := k.client.UpdateSecret(ctx, k.params.Namespace, helmSecret, metav1.UpdateOptions{}); err != nil {
+	helmState.Secret.Data[defaults.HelmValuesSecretKeyName] = []byte(k.helmYAMLValues)
+	if _, err := k.client.UpdateSecret(k.ctx, k.params.Namespace, helmState.Secret, metav1.UpdateOptions{}); err != nil {
 		k.Log("❌ Unable to store helm values file %s/%s Secret", k.params.Namespace, k.params.HelmValuesSecretName)
 		return err
 	}
@@ -622,7 +585,7 @@ func (k *K8sHubble) NewServiceAccount(name string) *corev1.ServiceAccount {
 		saFileName string
 	)
 
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 	switch {
 	case versioncheck.MustCompile(">1.10.99")(ciliumVer):
 		switch name {
@@ -652,7 +615,7 @@ func (k *K8sHubble) NewClusterRole(name string) *rbacv1.ClusterRole {
 		crFileName string
 	)
 
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 	switch {
 	case versioncheck.MustCompile(">1.10.99")(ciliumVer):
 		switch name {
@@ -682,7 +645,7 @@ func (k *K8sHubble) NewClusterRoleBinding(crbName string) *rbacv1.ClusterRoleBin
 		crbFileName string
 	)
 
-	ciliumVer := k.semVerCiliumVersion
+	ciliumVer := k.helmState.Version
 	switch {
 	case versioncheck.MustCompile(">1.10.99")(ciliumVer):
 		switch crbName {
