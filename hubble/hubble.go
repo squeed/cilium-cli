@@ -89,22 +89,16 @@ var (
 )
 
 type Parameters struct {
-	Namespace        string
-	Relay            bool
-	RelayImage       string
-	RelayVersion     string
-	RelayServiceType string
-	PortForward      int
-	CreateCA         bool
-	UI               bool
-	UIImage          string
-	UIBackendImage   string
-	UIVersion        string
-	UIPortForward    int
-	Writer           io.Writer
-	Context          string // Only for 'kubectl' pass-through commands
-	Wait             bool
-	WaitDuration     time.Duration
+	Namespace     string
+	Relay         bool
+	PortForward   int
+	CreateCA      bool
+	UI            bool
+	UIPortForward int
+	Writer        io.Writer
+	Context       string // Only for 'kubectl' pass-through commands
+	Wait          bool
+	WaitDuration  time.Duration
 
 	// K8sVersion is the Kubernetes version that will be used to generate the
 	// kubernetes manifests. If the auto-detection fails, this flag can be used
@@ -132,20 +126,6 @@ type Parameters struct {
 
 func (p *Parameters) Log(format string, a ...interface{}) {
 	fmt.Fprintf(p.Writer, format+"\n", a...)
-}
-
-func (p *Parameters) validateParams() error {
-	if p.RelayImage == defaults.RelayImage {
-		if !utils.CheckVersion(p.RelayVersion) && p.RelayVersion != "" {
-			return fmt.Errorf("invalid syntax %q for image tag", p.RelayVersion)
-		}
-	}
-	if p.UIImage == defaults.HubbleUIImage || p.UIBackendImage == defaults.HubbleUIBackendImage {
-		if !utils.CheckVersion(p.UIVersion) && p.UIVersion != "" {
-			return fmt.Errorf("invalid syntax %q for image tag", p.UIVersion)
-		}
-	}
-	return nil
 }
 
 func NewK8sHubble(ctx context.Context, client k8sHubbleImplementation, p Parameters) (*K8sHubble, error) {
@@ -463,10 +443,6 @@ func (k *K8sHubble) genManifests(ctx context.Context, printHelmTemplate bool, pr
 }
 
 func (k *K8sHubble) Enable() error {
-	if err := k.params.validateParams(); err != nil {
-		return err
-	}
-
 	caSecret, created, err := k.certManager.GetOrCreateCASecret(k.ctx, defaults.CASecretName, k.params.CreateCA)
 	if err != nil {
 		k.Log("❌ Unable to get or create the Cilium CA Secret: %s", err)

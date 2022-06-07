@@ -53,21 +53,8 @@ func newCmdHubbleEnable() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&params.Relay, "relay", true, "Deploy Hubble Relay")
-	// It can be deprecated since we have a helm option for it
-	cmd.Flags().StringVar(&params.RelayImage, "relay-image", "", "Image path to use for Relay")
-	// It can be deprecated since we have a helm option for it
-	cmd.Flags().StringVar(&params.RelayVersion, "relay-version", "", "Version of Relay to deploy")
-	// It can be deprecated since there is not a helm option for it and
-	cmd.Flags().StringVar(&params.RelayServiceType, "relay-service-type", "ClusterIP", "Type of Kubernetes service to expose Hubble Relay")
-	cmd.Flags().MarkDeprecated("relay-service-type", "value is no longer used for relay-service")
 	cmd.Flags().BoolVar(&params.UI, "ui", false, "Enable Hubble UI")
 
-	// It can be deprecated since we have a helm option for it
-	cmd.Flags().StringVar(&params.UIImage, "ui-image", "", "Image path to use for UI")
-	// It can be deprecated since we have a helm option for it
-	cmd.Flags().StringVar(&params.UIBackendImage, "ui-backend-image", "", "Image path to use for UI backend")
-	// It can be deprecated since we have a helm option for it
-	cmd.Flags().StringVar(&params.UIVersion, "ui-version", "", "Version of UI to deploy")
 	cmd.Flags().BoolVar(&params.CreateCA, "create-ca", true, "Automatically create CA if needed")
 	cmd.Flags().BoolVar(&params.Wait, "wait", true, "Wait for status to report success (no errors)")
 	cmd.Flags().DurationVar(&params.WaitDuration, "wait-duration", defaults.StatusWaitDuration, "Maximum time to wait for status")
