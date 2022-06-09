@@ -68,6 +68,8 @@ func (k *K8sInstaller) detectDatapathMode(withKPR bool) {
 		k.params.DatapathMode = DatapathTunnel
 	case k8s.KindEKS:
 		k.params.DatapathMode = DatapathAwsENI
+	case k8s.KindAWSCNI:
+		k.params.DatapathMode = DatapathAwsCNI
 	case k8s.KindGKE:
 		k.params.DatapathMode = DatapathGKE
 	case k8s.KindAKS:

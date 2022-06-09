@@ -427,6 +427,7 @@ const (
 	KindMinikube
 	KindKind
 	KindEKS
+	KindAWSCNI
 	KindGKE
 	KindAKS
 	KindMicrok8s
@@ -442,6 +443,8 @@ func (k Kind) String() string {
 		return "minikube"
 	case KindKind:
 		return "kind"
+	case KindAWSCNI:
+		return "AWSCNI"
 	case KindEKS:
 		return "EKS"
 	case KindGKE:
@@ -497,6 +500,18 @@ func (c *Client) AutodetectFlavor(ctx context.Context) Flavor {
 
 	if strings.HasPrefix(c.ClusterName(), "gke_") {
 		f.Kind = KindGKE
+		return f
+	}
+
+	dsl, err := c.ListDaemonSet(context.Background(), "kube-system", metav1.ListOptions{
+		// label retrieved from https://raw.githubusercontent.com/aws/amazon-vpc-cni-k8s/v1.7.10/config/v1.7/aws-k8s-cni.yaml
+		LabelSelector: "k8s-app=aws-node",
+	})
+	if err == nil && len(dsl.Items) != 0 {
+		if strings.HasSuffix(c.ClusterName(), ".eksctl.io") {
+			f.ClusterName = strings.ReplaceAll(c.ClusterName(), ".", "-")
+		}
+		f.Kind = KindAWSCNI
 		return f
 	}
 

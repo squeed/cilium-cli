@@ -1246,13 +1246,13 @@ func (c *Collector) SubmitLogsTasks(ctx context.Context, pods []*corev1.Pod, sin
 
 func (c *Collector) submitFlavorSpecificTasks(ctx context.Context, f k8s.Flavor) error {
 	switch f.Kind {
-	case k8s.KindEKS:
+	case k8s.KindEKS, k8s.KindAWSCNI:
 		if err := c.Pool.Submit(awsNodeDaemonSetName, func(ctx context.Context) error {
 			// Collect the 'kube-system/aws-node' DaemonSet.
 			d, err := c.Client.GetDaemonSet(ctx, awsNodeDaemonSetNamespace, awsNodeDaemonSetName, metav1.GetOptions{})
 			if err != nil {
-				if errors.IsNotFound(err) {
-					c.logDebug("DaemonSet %q not found in namespace %q - this is expected when running in ENI mode", awsNodeDaemonSetName, awsNodeDaemonSetNamespace)
+				if errors.IsNotFound(err) && f.Kind == k8s.KindAWSCNI {
+					c.logDebug("DaemonSet %q not found in namespace %q", awsNodeDaemonSetName, awsNodeDaemonSetNamespace)
 					return nil
 				}
 				return fmt.Errorf("failed to collect daemonset %q in namespace %q: %w", awsNodeDaemonSetName, awsNodeDaemonSetNamespace, err)

@@ -13,7 +13,7 @@ import (
 
 func needsNodeInit(k k8s.Kind) bool {
 	switch k {
-	case k8s.KindAKS, k8s.KindEKS, k8s.KindGKE:
+	case k8s.KindAKS, k8s.KindEKS, k8s.KindAWSCNI, k8s.KindGKE:
 		return true
 	}
 	return false

@@ -196,6 +196,12 @@ func (k *K8sInstaller) generateManifests(ctx context.Context) error {
 			// TODO(tgraf) Is this really sane?
 			helmMapOpts["egressMasqueradeInterfaces"] = "eth0"
 
+		case DatapathAwsCNI:
+			helmMapOpts["nodeinit.enabled"] = "true"
+			helmMapOpts["tunnel"] = "disabled"
+			helmMapOpts["cni.chainingMode"] = "aws-cni"
+			helmMapOpts["enableIPv4Masquerade"] = "false"
+
 		case DatapathGKE:
 			helmMapOpts["gke.enabled"] = "true"
 

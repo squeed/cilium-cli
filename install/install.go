@@ -195,6 +195,7 @@ type K8sInstaller struct {
 const (
 	DatapathTunnel = "tunnel"
 	DatapathAwsENI = "aws-eni"
+	DatapathAwsCNI = "aws-cni"
 	DatapathGKE    = "gke"
 	DatapathAzure  = "azure"
 
@@ -400,7 +401,7 @@ func (k *K8sInstaller) generateConfigMap() (*corev1.ConfigMap, error) {
 
 	if cm.Data["install-no-conntrack-iptables-rules"] == "true" {
 		switch k.params.DatapathMode {
-		case DatapathAwsENI:
+		case DatapathAwsENI, DatapathAwsCNI:
 			return nil, fmt.Errorf("--install-no-conntrack-iptables-rules cannot be enabled on AWS EKS")
 		case DatapathGKE:
 			return nil, fmt.Errorf("--install-no-conntrack-iptables-rules cannot be enabled on Google GKE")
